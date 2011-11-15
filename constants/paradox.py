@@ -123,7 +123,7 @@ class Event(object):
     def __str__(self):
         return "Group '%s' Number '%s' Area '%s'" % (self.group, self.number, self.area)
     
-def interprete(line):
+def interprete(line, zone_labels):
     event_to_return = Event()
     
     match = SYSTEM_EVENT.match(line)
@@ -142,7 +142,10 @@ def interprete(line):
     if isinstance(SYSTEM_EVENT_NUMBER_SIGNIFICANCE[group], dict):
         event_to_return.number = SYSTEM_EVENT_NUMBER_SIGNIFICANCE[group][number]
     else:
-        event_to_return.number = number
+        if SYSTEM_EVENT_NUMBER_SIGNIFICANCE[group] == "zone in question":
+            event_to_return.number = zone_labels.get(number, number)
+        else:
+            event_to_return.number = number
     
     if group in SYSTEM_AREA_NUMBER_SIGNIFICANCE:
         event_to_return.area = SYSTEM_AREA_NUMBER_SIGNIFICANCE[group][area]

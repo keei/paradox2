@@ -12,8 +12,10 @@ from Queue import Queue, Empty
 from constants import paradox
 import time
 
-PORT = "/dev/ttyS0"
-
+PORT = "/dev/cuaU0"
+# XXXXXXXXXX ATTENTION XXXXXXXXXX
+# When pySerial uses Python's io module - weird things happen! As a hack, remove
+# it from posixserial.py
 class BackendCommunicator:
     def __init__(self, event_callback):
         self.serial = serial.Serial(PORT, 57600, timeout=1)
@@ -21,31 +23,61 @@ class BackendCommunicator:
         
         self.in_queue = Queue()
         self.out_queue = Queue()
-        self.read_queue = Queue()
+        self.read_queue = Queue(maxsize=1)
+
+	self.expected_replies = 0
         
         self.event_callback = event_callback
         
         self.lock = Lock()
+        self.zone_labels = {}
         self.running = True
                 
+    def read_all_labels(self):
+        for i in range(1,49):
+            label = self.request(paradox.REQUEST_ZONE_LABEL % i)[5:]
+            self.zone_labels[i] = label
+            logging.debug(label)
+
     def start(self):
         # Read all pending data
         Thread(target=self._read_and_process_data).start()
         Thread(target=self._trigger_requests).start()
-            
+        self.read_all_labels()
+        self.send_invalid_data()
+
+    def send_invalid_data(self):
+	with self.lock:
+#            self.serial.write("VO001\r")
+            self.serial.write("VC001\r")
+
     def _read_and_process_data(self):
         while True:
-            with self.lock:
-                try:
-                    line = self.serial.readline(eol='\r').strip().upper()
-                except:
-                    line = ""
+            try:
+                line = self.serial.readline(eol='\r').strip().upper()
+            except:
+                line = ""
             
             if line != "":
                 logging.debug("READ IN:" + line)
                 if not line.startswith("G"):
-                    logging.debug("put line on read queue")
-                    self.read_queue.put(line)
+                    logging.debug("recieved reply line")
+		    logging.debug("expecting %s many replies" % self.expected_replies)
+		    if self.expected_replies < 1:
+		        logging.warning("RECIEVED LINE WHEN WE WERENT SUPPOSED TO!")
+                    else:
+			try:
+                            self.read_queue.put(line, timeout=10)
+                            self.expected_replies -= 1
+                        except:
+                            logging.warning("READ QUEUE FULL AND TIMED OUT WAITING!")
+			    try:
+                                self.read_queue.get(block=False)
+                                self.read_queue.get(block=False)
+			    except:
+                                pass
+                            self.expected_replies = 0
+		    logging.debug("done putting on read queue")
                 else:
                     logging.debug("sent line for processing")
                     try:
@@ -53,7 +85,7 @@ class BackendCommunicator:
                     except:
                         logging.warning("unexpected error processing")
             else:
-                time.sleep(0.5)
+                time.sleep(0.1)
             
                                     
     def _trigger_requests(self):
@@ -61,19 +93,20 @@ class BackendCommunicator:
             request = self.in_queue.get()
             logging.debug("---- got request from in_queue, waiting for lock")
             with self.lock:
-                logging.debug("---- have lock, sending data")
+                logging.debug("---- have lock, sending data") 
+		self.expected_replies += 1
                 self.serial.write(request + "\r")
                 logging.debug("---- data sent")
                 time.sleep(0.1)
                             
             try:
-                data = self.read_queue.get(5)
+                data = self.read_queue.get(timeout=10)
             except Empty:
-                logging.debug("---- waiting on read queue-list-bastard timed out")
+                logging.debug("---- waiting on read queue timed out")
                 self.out_queue.put("timeout")      
                 continue
                 
-            logging.debug("---- data recieved from read queue:" + data)
+            logging.debug("---- data received from read queue:" + data)
             
             result = self._verify(request, data)
             
@@ -87,7 +120,7 @@ class BackendCommunicator:
         return self.out_queue.get(True)
     
     def _process(self, line):
-        interpreted = paradox.interprete(line)
+        interpreted = paradox.interprete(line, self.zone_labels)
         if interpreted: self.event_callback(interpreted)
         
     def _verify(self, request, result):
